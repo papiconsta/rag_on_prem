@@ -39,18 +39,9 @@ import ollama
 # knowledge or assumptions from external sources.
 # """
 system_prompt = """
+ 
  Είσαι Ενας ψηφιακός βοηθός που δουλειά σου ειναι να επιστρεφεις στον χρηστη , οτι σου ζηταει σχετικα
  με την γνωση που εχει ανεβασει στην βαση δεδομενων σου.
-
-Παρακαλω , διαβασε τα περιεχομενα και απαντησε μονολεκτικα με την μορφη :
-Ερώτηση (Δεν χρειαζεται να το προβαλεις πισω):
-  Τι ειναι η ΓΓΕΜΥ ?
-
-Απανστηση : 
- Ειναι Γενικη Γραμματεια Εμπορειου Ηλεκτορνικων .
-
-Αν σε περίπτωση υπαρχουν καποια συγκεκριμενα δεδομενα σχετικα με
-την ερωτηση , μπορεις να αναφερεις τις περιπτωσεις που μπορει να προκυψουν.
 
 """
 
@@ -86,11 +77,20 @@ def process_document(uploaded_file: UploadedFile)-> list[Document]:
         
         os.unlink(temp_file.name)
 
+EMBED_BATCH_SIZE = 32
+OLLAMA_TIMEOUT_SECONDS = 600
+
 def get_vector_collection() -> chromadb.Collection:
 
     ollama_ef = OllamaEmbeddingFunction(
         url="http://localhost:11434/api/embeddings",
         model_name="nomic-embed-text:latest"
+    )
+    # Replace Chroma's default ollama client with one that won't read-timeout on
+    # large batches or cold-start model loads.
+    ollama_ef._client = ollama.Client(
+        host="http://localhost:11434",
+        timeout=OLLAMA_TIMEOUT_SECONDS,
     )
 
     chroma_client = chromadb.PersistentClient(path="./demo-rag-chroma")
@@ -108,14 +108,20 @@ def add_to_vector_collection(all_splits: list[Document],file_name:str):
         documents.append(split.page_content)
         metadatas.append(split.metadata)
         ids.append(f"{file_name}_{idx}")
-    
-    collection.upsert(
-        documents=documents,
-        metadatas=metadatas,
-        ids=ids, 
-    )
 
-    st.success("Data added to the vector store!")
+    total = len(documents)
+    progress = st.progress(0.0, text=f"Embedding 0/{total} chunks...")
+    for start in range(0, total, EMBED_BATCH_SIZE):
+        end = min(start + EMBED_BATCH_SIZE, total)
+        collection.upsert(
+            documents=documents[start:end],
+            metadatas=metadatas[start:end],
+            ids=ids[start:end],
+        )
+        progress.progress(end / total, text=f"Embedding {end}/{total} chunks...")
+    progress.empty()
+
+    st.success(f"Added {total} chunks to the vector store!")
 
 def query_collection(prompt: str,n_results: int =10):
     collection = get_vector_collection()
@@ -124,8 +130,9 @@ def query_collection(prompt: str,n_results: int =10):
 
 def call_llm(context: str,prompt: str):
     response = ollama.chat(
-        model="ilsp/llama-krikri-8b-instruct:latest",
+        model="gemma4:e4b",
         stream=True,
+        think=True,
         messages = [
             {
                 "role":"system",
@@ -140,10 +147,13 @@ def call_llm(context: str,prompt: str):
         ],
     )
     for chunk in response:
-        if chunk["done"] is False:
-            yield chunk["message"]["content"]
-        else:
-            break;
+        msg = chunk["message"]
+        if msg.thinking:
+            yield ("think", msg.thinking)
+        if msg.content:
+            yield ("answer", msg.content)
+        if chunk.get("done"):
+            break
 
 if __name__ == "__main__":
     with st.sidebar:
@@ -151,8 +161,8 @@ if __name__ == "__main__":
         st.header("RAG QnA")
     
         uploaded_file = st.file_uploader(
-             " Upload TXT file for QnA ",
-                type=["txt"],
+             " Upload TXT,XLSX,PDF file for QnA ",
+                type=["txt","xlsx","pdf"],
                 accept_multiple_files = False
         )
         process = st.button("Process")
@@ -173,5 +183,16 @@ ask = st.button("Ask")
 if ask and prompt:
     results = query_collection(prompt)
     context = results.get("documents")[0]
-    response = call_llm(context=context,prompt=prompt)
-    st.write(response)
+
+    with st.expander("Thinking process", expanded=False):
+        think_box = st.empty()
+    answer_box = st.empty()
+
+    think_buf, answer_buf = "", ""
+    for kind, text in call_llm(context=context, prompt=prompt):
+        if kind == "think":
+            think_buf += text
+            think_box.markdown(think_buf)
+        else:
+            answer_buf += text
+            answer_box.markdown(answer_buf)

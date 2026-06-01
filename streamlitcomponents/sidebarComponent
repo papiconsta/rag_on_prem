@@ -1,0 +1,59 @@
+from concurrent.futures import process
+import os
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import streamlit as st
+from streamlit.runtime.uploaded_file_manager import UploadedFile
+
+
+def process_document(uploaded_file: UploadedFile)-> list[Document]:
+    """
+        Makes a temporary file as an object that we can
+        "Welcome" our file that we want to upload into
+        the system 
+    """
+
+    temp_file = tempfile.NamedTemporaryFile('w+b',suffix='.txt',delete=False)
+    temp_file.write(uploaded_file.read())
+    temp_file.close()
+    
+    """
+        It takes the temp_file loads it and then 
+        throught the recursive text splitter it
+        "chops" the words from our file(temp_file)
+        into chunks!
+    """
+    try:
+
+        loader = PyMuPDFLoader(temp_file.name)
+        docs = loader.load()
+
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=400,
+            chunk_overlap=100,
+            separators=["\n\n","\n",".","?","!"," ",""]
+        )   
+        return text_splitter.split_documents(docs)
+    finally:
+        
+        os.unlink(temp_file.name)
+
+def sidebar(
+    page_title:str,
+    header:str,
+    file_types:list,
+    sidebar_title:str,
+    accept_multiple_files:bool=False,
+    button_text:str="Embedd and Process"
+):
+    with st.sidebar:
+        st.set_page_config(page_title = page_title)
+        st.header(header)
+    
+        uploaded_file = st.file_uploader(
+             sidebar_title,
+                type=file_types,
+                accept_multiple_files = accept_multiple_files
+        )
+        process = st.button(button_text)
+    
